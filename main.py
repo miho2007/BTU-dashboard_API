@@ -4,16 +4,14 @@ import shutil
 import urllib.parse
 from typing import Optional, Tuple, List, Dict, Any
 import re
-
 import aiofiles
-from fastapi import FastAPI, Request, Response, HTTPException, Body, Query
-from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse, JSONResponse
+from fastapi import FastAPI, Body, HTTPException, Query
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from jinja2 import Environment, FileSystemLoader
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
-import httpx
 
 app = FastAPI(title="BTU Courses - FastAPI Playwright Scraper")
 
@@ -30,7 +28,6 @@ BASE_URL = "https://classroom.btu.edu.ge/en/student/me/courses"
 HTML_DIR = "html"
 COURSES_DIR = "courses"
 TEMPLATES_DIR = "templates"
-COOKIE = os.getenv("BTU_COOKIE", None)
 
 os.makedirs(HTML_DIR, exist_ok=True)
 os.makedirs(COURSES_DIR, exist_ok=True)
@@ -39,58 +36,30 @@ os.makedirs(TEMPLATES_DIR, exist_ok=True)
 jinja_env = Environment(loader=FileSystemLoader(TEMPLATES_DIR), autoescape=True)
 
 # ---------------- Playwright fetch ----------------
-async def fetch_text_playwright(url: str, cookie: Optional[str] = None) -> str:
-    """Fetch JS-rendered page using Playwright with table wait."""
+async def fetch_text_playwright(url: str, storage_state: Optional[str] = None) -> str:
+    """Fetch JS-rendered page using Playwright with storageState authentication."""
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context()
-
-        # Set cookies properly
-        if cookie:
-            cookies_list = []
-            for c in cookie.split(";"):
-                if "=" in c:
-                    name, value = c.strip().split("=", 1)
-                    cookies_list.append({
-                        "name": name,
-                        "value": value,
-                        "domain": ".btu.edu.ge",
-                        "path": "/",
-                        "httpOnly": False,
-                        "secure": True,
-                        "sameSite": "Lax"
-                    })
-            if cookies_list:
-                await context.add_cookies(cookies_list)
-
+        context = await browser.new_context(storage_state=storage_state)
         page = await context.new_page()
         await page.goto(url, timeout=60000)
 
-        # Wait for courses table to load
         try:
+            # Wait for course table to appear
             await page.wait_for_selector("table.table.table-striped.table-bordered.table-hover.fluid", timeout=15000)
         except Exception:
             print("Warning: table not found, page may not have loaded fully.")
 
-        await page.wait_for_timeout(1000)  # extra wait to ensure JS finishes
+        await page.wait_for_timeout(1000)  # extra wait for JS
         html = await page.content()
         await browser.close()
         return html
 
-# ---------------- HTTPX fetch ----------------
-async def fetch_bytes(url: str, cookie: Optional[str] = None, client: Optional[httpx.AsyncClient] = None) -> bytes:
-    headers = {"User-Agent": "Mozilla/5.0", "Accept": "*/*", "Cookie": cookie or COOKIE}
-    close_client = False
-    if client is None:
-        client = httpx.AsyncClient(timeout=60.0, follow_redirects=True)
-        close_client = True
-    try:
-        r = await client.get(url, headers=headers)
-        r.raise_for_status()
-        return r.content
-    finally:
-        if close_client:
-            await client.aclose()
+# ---------------- File saving ----------------
+async def save_bytes(path: str, data: bytes):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    async with aiofiles.open(path, "wb") as f:
+        await f.write(data)
 
 # ---------------- Parsing helpers ----------------
 def parse_num(td_text: str):
@@ -132,14 +101,8 @@ def parse_courses(html: str) -> Tuple[List[Dict[str, Any]], Optional[float]]:
 
     return courses, total_ects
 
-# ---------------- File saving ----------------
-async def save_bytes(path: str, data: bytes):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    async with aiofiles.open(path, "wb") as f:
-        await f.write(data)
-
-# ---------------- Course fetch ----------------
-async def fetch_course_pages(course: Dict[str, Any], cookie: Optional[str] = None) -> Dict[str, Any]:
+# ---------------- Fetch course pages ----------------
+async def fetch_course_pages(course: Dict[str, Any], storage_state: Optional[str] = "auth.json") -> Dict[str, Any]:
     if not course.get("url"):
         return {}
     course_name = course["name"]
@@ -149,7 +112,7 @@ async def fetch_course_pages(course: Dict[str, Any], cookie: Optional[str] = Non
     os.makedirs(html_folder, exist_ok=True)
     os.makedirs(course_folder, exist_ok=True)
 
-    course_html = await fetch_text_playwright(course["url"], cookie=cookie)
+    course_html = await fetch_text_playwright(course["url"], storage_state=storage_state)
     async with aiofiles.open(os.path.join(html_folder, "course.html"), "w", encoding="utf-8") as f:
         await f.write(course_html)
 
@@ -158,43 +121,31 @@ async def fetch_course_pages(course: Dict[str, Any], cookie: Optional[str] = Non
 # ---------------- API routes ----------------
 @app.get("/api/courses")
 async def api_courses():
-    if not COOKIE:
-        raise HTTPException(status_code=400, detail="Missing BTU_COOKIE environment variable")
-    html = await fetch_text_playwright(BASE_URL, cookie=COOKIE)
+    if not os.path.exists("auth.json"):
+        raise HTTPException(status_code=400, detail="Auth file missing. Login manually first to create auth.json")
+    
+    html = await fetch_text_playwright(BASE_URL, storage_state="auth.json")
     courses, total_ects = parse_courses(html)
-    # Fetch individual course pages immediately
+
     courses_data = []
     for course in courses:
-        data = await fetch_course_pages(course, cookie=COOKIE)
-        courses_data.append({**course, **data})
-    return {"courses": courses_data, "total_ects": total_ects}
+        await fetch_course_pages(course, storage_state="auth.json")
+        courses_data.append(course)
+
+    return {"courses": courses, "total_ects": total_ects, "fetched_courses": len(courses)}
 
 @app.post("/api/fetch")
 async def api_fetch(url: str = Body(...), binary: bool = Body(False)):
     try:
         if binary:
-            b = await fetch_bytes(url, cookie=COOKIE)
-            return Response(content=b, media_type="application/octet-stream")
+            import httpx
+            async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+                r = await client.get(url)
+                r.raise_for_status()
+                return Response(content=r.content, media_type="application/octet-stream")
         else:
-            txt = await fetch_text_playwright(url, cookie=COOKIE)
-            return HTMLResponse(txt)
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-@app.get("/api/proxy")
-async def api_proxy(url: str = Query(...)):
-    if not url:
-        raise HTTPException(status_code=400, detail="Missing url")
-    try:
-        headers = {"User-Agent": "Mozilla/5.0", "Accept": "*/*", "Cookie": COOKIE} if COOKIE else {"User-Agent": "Mozilla/5.0"}
-        async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
-            r = await client.get(url, headers=headers, stream=True)
-            r.raise_for_status()
-            async def streamer():
-                async for chunk in r.aiter_bytes():
-                    yield chunk
-            content_type = r.headers.get("content-type", "application/octet-stream")
-            return StreamingResponse(streamer(), media_type=content_type)
+            html = await fetch_text_playwright(url, storage_state="auth.json")
+            return HTMLResponse(html)
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
@@ -210,3 +161,21 @@ async def index():
         html_list += f'<li><a href="/courses/{c}/course.html">{c}</a></li>'
     html_list += "</ul>"
     return HTMLResponse(f"<h1>Courses</h1>{html_list}")
+
+# ---------------- Manual login helper ----------------
+async def create_storage_state():
+    """Run this once manually to generate auth.json for Playwright"""
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=False)
+        context = await browser.new_context()
+        page = await context.new_page()
+        await page.goto(BASE_URL)
+        print("Login manually in the browser, then press Enter here...")
+        input()
+        await context.storage_state(path="auth.json")
+        await browser.close()
+
+# ---------------- Run server ----------------
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=10000)
