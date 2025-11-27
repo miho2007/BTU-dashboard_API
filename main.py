@@ -11,6 +11,22 @@ from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse, JSO
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader
 import aiofiles
+from fastapi.middleware.cors import CORSMiddleware
+
+
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # or your frontend URL
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+
+
 
 app = FastAPI(title="BTU Courses - FastAPI proxy & scraper")
 
