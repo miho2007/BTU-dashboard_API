@@ -54,6 +54,10 @@ async def fetch_text(url: str, cookie: Optional[str] = None, client: Optional[ht
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Referer": BASE_URL,
     }
     if cookie:
         headers["Cookie"] = cookie
