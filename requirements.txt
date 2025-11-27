@@ -1,0 +1,10 @@
+httpx
+fastapi
+uvicorn
+sqlalchemy
+pydantic
+jinja2
+python-multipart
+aiosqlite
+beautifulsoup4
+aiofiles
