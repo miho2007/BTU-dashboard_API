@@ -3,16 +3,15 @@ import os
 import shutil
 import urllib.parse
 from typing import Optional, Tuple, List, Dict, Any
+import re
 
-import httpx
-from bs4 import BeautifulSoup
+import aiofiles
 from fastapi import FastAPI, Request, Response, HTTPException, Body, Query
 from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from jinja2 import Environment, FileSystemLoader
-import aiofiles
 from fastapi.middleware.cors import CORSMiddleware
-import re
+from jinja2 import Environment, FileSystemLoader
+from playwright.async_api import async_playwright
 
 app = FastAPI(title="BTU Courses - FastAPI proxy & scraper")
 
@@ -24,7 +23,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configuration - change if needed
+# Configuration
 BASE_URL = "https://classroom.btu.edu.ge/en/student/me/courses"
 TEMPLATES_DIR = "templates"
 TEMPLATE_NAME = "template.html"
@@ -32,7 +31,6 @@ HTML_DIR = "html"
 COURSES_DIR = "courses"
 INDEX_HTML = "index.html"
 
-# In-memory cookie (can be set via API or env)
 COOKIE = os.getenv("BTU_COOKIE", None)
 
 # Ensure folders exist
@@ -43,39 +41,28 @@ os.makedirs(TEMPLATES_DIR, exist_ok=True)
 # Jinja2 environment
 jinja_env = Environment(loader=FileSystemLoader(TEMPLATES_DIR), autoescape=True)
 
-# --- Utility network functions (async using httpx) ---
+# ------------------ Playwright fetch ------------------
+async def fetch_text_playwright(url: str, cookie: Optional[str] = None) -> str:
+    """Fetch page HTML using Playwright to bypass Cloudflare/JS."""
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context()
+        if cookie:
+            cookies_list = []
+            for c in cookie.split(";"):
+                if "=" in c:
+                    name, value = c.strip().split("=", 1)
+                    cookies_list.append({"name": name, "value": value, "domain": ".btu.edu.ge", "path": "/"})
+            if cookies_list:
+                await context.add_cookies(cookies_list)
+        page = await context.new_page()
+        await page.goto(url, timeout=60000)
+        content = await page.content()
+        await browser.close()
+        return content
 
-async def fetch_text(url: str, cookie: Optional[str] = None, client: Optional[httpx.AsyncClient] = None) -> str:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Referer": "https://classroom.btu.edu.ge/ge/student/me/courses",
-        "X-Requested-With": "XMLHttpRequest",
-        "Sec-Fetch-Site": "same-origin",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Ch-Ua": '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
-        "Sec-Ch-Ua-Platform": '"Windows"',
-        "Cookie": str(cookie or "")
-    }
-    close_client = False
-    if client is None:
-        client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
-        close_client = True
-    try:
-        r = await client.get(url, headers=headers)
-        if r.status_code == 403:
-            raise HTTPException(
-                status_code=403,
-                detail=f"Access forbidden: 403. Invalid/expired cookie or Cloudflare blocked request. URL: {url}"
-            )
-        r.raise_for_status()
-        return r.text
-    finally:
-        if close_client:
-            await client.aclose()
-
+# ------------------ HTTPX fetch for binaries ------------------
+import httpx
 
 async def fetch_bytes(url: str, cookie: Optional[str] = None, client: Optional[httpx.AsyncClient] = None) -> bytes:
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "*/*", "Cookie": cookie or COOKIE}
@@ -96,8 +83,7 @@ async def fetch_bytes(url: str, cookie: Optional[str] = None, client: Optional[h
         if close_client:
             await client.aclose()
 
-
-# --- Parsing helpers (ported from your script) ---
+# ------------------ Parsing helpers ------------------
 def parse_num(td_text: str):
     if td_text is None:
         return None
@@ -107,6 +93,7 @@ def parse_num(td_text: str):
     except Exception:
         return txt.strip()
 
+from bs4 import BeautifulSoup
 
 def parse_courses(html: str) -> Tuple[List[Dict[str, Any]], Optional[float]]:
     soup = BeautifulSoup(html, "html.parser")
@@ -122,28 +109,21 @@ def parse_courses(html: str) -> Tuple[List[Dict[str, Any]], Optional[float]]:
 
     for tr in tbody.find_all("tr"):
         tds = tr.find_all("td")
-
         if len(tds) == 2 and not tds[0].get_text(strip=True):
             total_ects = parse_num(tds[-1].get_text(strip=True))
             continue
-
         if len(tds) != 6:
             continue
-
         name_a = tds[2].find("a")
         name = name_a.get_text(strip=True) if name_a else tds[2].get_text(strip=True)
         grade = parse_num(tds[3].get_text(strip=True))
         ects = parse_num(tds[5].get_text(strip=True))
         url = name_a["href"] if name_a and name_a.has_attr("href") else None
-
-        # Ensure absolute URL if relative
         if url and not urllib.parse.urlparse(url).netloc:
             url = urllib.parse.urljoin(BASE_URL, url)
-
         courses.append({"name": name, "grade": grade, "ects": ects, "url": url})
 
     return courses, total_ects
-
 
 def extract_course_urls(html: str) -> Dict[str, str]:
     soup = BeautifulSoup(html, "html.parser")
@@ -165,7 +145,6 @@ def extract_course_urls(html: str) -> Dict[str, str]:
         href = syllabus_file["href"]
         urls["syllabus_file"] = urllib.parse.urljoin(BASE_URL, href)
     return urls
-
 
 def parse_scores(html: str) -> Dict[str, Any]:
     soup = BeautifulSoup(html, "html.parser")
@@ -200,7 +179,6 @@ def parse_scores(html: str) -> Dict[str, Any]:
                 data["assessments"].append({"component": component, "score": score or None, "max_points": max_points})
     return data
 
-
 def parse_files(html: str, my_lector: Optional[str] = None) -> List[Dict[str, Optional[str]]]:
     soup = BeautifulSoup(html, "html.parser")
     materials = []
@@ -232,7 +210,6 @@ def parse_files(html: str, my_lector: Optional[str] = None) -> List[Dict[str, Op
             materials.append({"name": name, "url": url, "external_url": ext_url})
     return materials
 
-
 def parse_groups(html: str) -> Dict[str, List[str]]:
     soup = BeautifulSoup(html, "html.parser")
     table = soup.select_one("#groups")
@@ -247,8 +224,7 @@ def parse_groups(html: str) -> Dict[str, List[str]]:
             groups.append(text)
     return {"groups": groups}
 
-
-# Helper to write files async
+# ------------------ File saving ------------------
 async def save_bytes(path: str, data: bytes):
     dirpath = os.path.dirname(path)
     if dirpath and not os.path.exists(dirpath):
@@ -256,10 +232,9 @@ async def save_bytes(path: str, data: bytes):
     async with aiofiles.open(path, "wb") as f:
         await f.write(data)
 
-
-# --- High-level flow functions ---
+# ------------------ Course fetch ------------------
 async def fetch_course_pages(course: Dict[str, Any], cookie: Optional[str] = None) -> Dict[str, Any]:
-    """Fetch course main page and detect subpages (syllabus, files, scores, groups). Write course html to html/<course_name>/course.html"""
+    """Fetch course page & subpages using Playwright."""
     if not course.get("url"):
         return {}
     course_name = course["name"]
@@ -270,17 +245,15 @@ async def fetch_course_pages(course: Dict[str, Any], cookie: Optional[str] = Non
     os.makedirs(course_folder, exist_ok=True)
     os.makedirs(os.path.join(course_folder, "material"), exist_ok=True)
 
-    course_html = await fetch_text(course["url"], cookie=cookie)
-    # save course.html
+    course_html = await fetch_text_playwright(course["url"], cookie=cookie)
     async with aiofiles.open(os.path.join(html_folder, "course.html"), "w", encoding="utf-8") as f:
         await f.write(course_html)
 
     urls = extract_course_urls(course_html)
-    # fetch subpages according to rules
     async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
         for name, url in urls.items():
+            path_html = os.path.join(html_folder, f"{name}.html")
             if name == "syllabus_file":
-                # syllabus pdf - skip if exists in course_folder
                 out_pdf = os.path.join(course_folder, "syllabus.pdf")
                 if not os.path.exists(out_pdf):
                     try:
@@ -289,25 +262,10 @@ async def fetch_course_pages(course: Dict[str, Any], cookie: Optional[str] = Non
                         await save_bytes(out_pdf, b)
                     except Exception as e:
                         print("syllabus download failed", e)
-            elif name == "scores":
-                try:
-                    txt = await fetch_text(url, cookie=cookie, client=client)
-                    async with aiofiles.open(os.path.join(html_folder, f"{name}.html"), "w", encoding="utf-8") as f:
-                        await f.write(txt)
-                except Exception as e:
-                    print("scores fetch failed", e)
-            elif name == "files":
-                try:
-                    txt = await fetch_text(url, cookie=cookie, client=client)
-                    async with aiofiles.open(os.path.join(html_folder, f"{name}.html"), "w", encoding="utf-8") as f:
-                        await f.write(txt)
-                except Exception as e:
-                    print("files fetch failed", e)
             else:
-                path_html = os.path.join(html_folder, f"{name}.html")
                 if not os.path.exists(path_html):
                     try:
-                        txt = await fetch_text(url, cookie=cookie, client=client)
+                        txt = await fetch_text_playwright(url, cookie=cookie)
                         async with aiofiles.open(path_html, "w", encoding="utf-8") as f:
                             await f.write(txt)
                     except Exception as e:
@@ -315,9 +273,8 @@ async def fetch_course_pages(course: Dict[str, Any], cookie: Optional[str] = Non
 
     return {"course_html_path": os.path.join(html_folder, "course.html"), "urls": urls, "html_folder": html_folder, "course_folder": course_folder}
 
-
+# ------------------ Parse course data ------------------
 async def parse_course_data_from_folder(html_folder: str) -> Dict[str, Any]:
-    """Read scores.html, files.html, groups.html from html_folder (if present) and parse."""
     data = {}
     scores_path = os.path.join(html_folder, "scores.html")
     if os.path.exists(scores_path):
@@ -337,13 +294,11 @@ async def parse_course_data_from_folder(html_folder: str) -> Dict[str, Any]:
         data["groups"] = parse_groups(txt)
     return data
 
-
-# --- HTML generation functions ---
+# ------------------ HTML Generation ------------------
 def fmt_num(val):
     if isinstance(val, float) and val == int(val):
         return str(int(val))
     return str(val)
-
 
 def get_grade_color(grade: float) -> str:
     if grade >= 91:
@@ -359,21 +314,8 @@ def get_grade_color(grade: float) -> str:
     else:
         return "#991b1b"
 
-
 def get_percentage_color(percentage: float) -> str:
-    if percentage >= 91:
-        return "#22c55e"
-    elif percentage >= 81:
-        return "#84cc16"
-    elif percentage >= 71:
-        return "#eab308"
-    elif percentage >= 61:
-        return "#f97316"
-    elif percentage >= 51:
-        return "#ef4444"
-    else:
-        return "#991b1b"
-
+    return get_grade_color(percentage)
 
 def generate_course_html(course: Dict[str, Any], data: Dict[str, Any]) -> str:
     scores = data.get("scores", {})
@@ -392,10 +334,7 @@ def generate_course_html(course: Dict[str, Any], data: Dict[str, Any]) -> str:
             percentage = 0
         grade_color = get_percentage_color(percentage)
         grade_display = f"{fmt_num(grade)}/{fmt_num(max_possible)}"
-        if 0 < percentage < 100:
-            pct_badge = f'<span class="pct-badge" style="background: {grade_color}20; color: {grade_color}">{percentage:.0f}%</span>'
-        else:
-            pct_badge = ""
+        pct_badge = f'<span class="pct-badge" style="background: {grade_color}20; color: {grade_color}">{percentage:.0f}%</span>' if 0 < percentage < 100 else ""
     elif isinstance(grade, (int, float)):
         grade_color = get_grade_color(float(grade))
         grade_display = fmt_num(grade)
@@ -426,10 +365,7 @@ def generate_course_html(course: Dict[str, Any], data: Dict[str, Any]) -> str:
                     percentage = (score_val / max_points) * 100
                     color = get_percentage_color(percentage)
                     score_class = f'" style="color: {color}'
-                    if 0 < percentage < 100:
-                        pct = f'<span class="pct-badge" style="background: {color}20; color: {color}">{percentage:.0f}%</span>'
-                    else:
-                        pct = ""
+                    pct = f'<span class="pct-badge" style="background: {color}20; color: {color}">{percentage:.0f}%</span>' if 0 < percentage < 100 else ""
                 else:
                     score_class = ""
                     pct = ""
@@ -460,8 +396,7 @@ def generate_course_html(course: Dict[str, Any], data: Dict[str, Any]) -> str:
     """
     return html
 
-
-# --- API routes ---
+# ------------------ API Routes ------------------
 @app.post("/api/fetch")
 async def api_fetch(url: str = Body(...), binary: bool = Body(False)):
     try:
@@ -469,13 +404,10 @@ async def api_fetch(url: str = Body(...), binary: bool = Body(False)):
             b = await fetch_bytes(url, cookie=COOKIE)
             return Response(content=b, media_type="application/octet-stream")
         else:
-            txt = await fetch_text(url, cookie=COOKIE)
+            txt = await fetch_text_playwright(url, cookie=COOKIE)
             return HTMLResponse(txt)
-    except HTTPException as e:
-        return JSONResponse(status_code=e.status_code, content={"error": e.detail})
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
-
 
 @app.get("/api/proxy")
 async def api_proxy(url: str = Query(...)):
@@ -496,15 +428,12 @@ async def api_proxy(url: str = Query(...)):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
-# Mount static folders for templates and generated HTML
+# ------------------ Static files ------------------
 app.mount("/html", StaticFiles(directory=HTML_DIR), name="html")
 app.mount("/courses", StaticFiles(directory=COURSES_DIR), name="courses")
 
-
 @app.get("/")
 async def index():
-    # Just list courses folder
     courses_list = sorted(os.listdir(COURSES_DIR))
     html_list = "<ul>"
     for c in courses_list:
