@@ -54,6 +54,14 @@ async def fetch_text_playwright(url: str, cookie: Optional[str] = None) -> str:
                 await context.add_cookies(cookies_list)
         page = await context.new_page()
         await page.goto(url, timeout=60000)
+
+        # --- Wait for table to load to avoid 0 courses ---
+        try:
+            await page.wait_for_selector("table.table.table-striped.table-bordered.table-hover.fluid", timeout=15000)
+        except Exception:
+            pass  # fallback if selector not found
+
+        await page.wait_for_timeout(1000)  # extra 1s to ensure JS finishes
         html = await page.content()
         await browser.close()
         return html
