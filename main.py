@@ -13,7 +13,7 @@ from jinja2 import Environment, FileSystemLoader
 import aiofiles
 from fastapi.middleware.cors import CORSMiddleware
 
-
+app = FastAPI(title="BTU Courses - FastAPI proxy & scraper")
 
 
 app.add_middleware(
@@ -28,7 +28,7 @@ app.add_middleware(
 
 
 
-app = FastAPI(title="BTU Courses - FastAPI proxy & scraper")
+
 
 # Configuration - change if needed
 BASE_URL = "https://classroom.btu.edu.ge/en/student/me/courses"
