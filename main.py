@@ -57,7 +57,7 @@ async def fetch_text(url: str, cookie: Optional[str] = None, client: Optional[ht
         "Sec-Fetch-Dest": "empty",
         "Sec-Ch-Ua": '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
         "Sec-Ch-Ua-Platform": '"Windows"',
-        "Cookie": cookie or COOKIE
+        "Cookie": str(cookie or "")
     }
     close_client = False
     if client is None:
