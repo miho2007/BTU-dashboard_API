@@ -12,9 +12,9 @@ from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader
 import aiofiles
 from fastapi.middleware.cors import CORSMiddleware
+import re
 
 app = FastAPI(title="BTU Courses - FastAPI proxy & scraper")
-
 
 app.add_middleware(
     CORSMiddleware,
@@ -23,12 +23,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-
-
-
-
 
 # Configuration - change if needed
 BASE_URL = "https://classroom.btu.edu.ge/en/student/me/courses"
@@ -50,6 +44,7 @@ os.makedirs(TEMPLATES_DIR, exist_ok=True)
 jinja_env = Environment(loader=FileSystemLoader(TEMPLATES_DIR), autoescape=True)
 
 # --- Utility network functions (async using httpx) ---
+
 async def fetch_text(url: str, cookie: Optional[str] = None, client: Optional[httpx.AsyncClient] = None) -> str:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -62,16 +57,19 @@ async def fetch_text(url: str, cookie: Optional[str] = None, client: Optional[ht
         "Sec-Fetch-Dest": "empty",
         "Sec-Ch-Ua": '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
         "Sec-Ch-Ua-Platform": '"Windows"',
-        "Cookie": "_fbp=fb.2.1754130837265.439374279506353971; sbjs_migrations=1418474375998%3D1; sbjs_first_add=fd%3D2025-09-14%2019%3A24%3A54%7C%7C%7Cep%3Dhttps%3A%2F%2Fbtu.edu.ge%2Fstsavla%2Fakademiuri-kalendari%2F%7C%7C%7Crf%3D%28none%29; sbjs_first=typ%3Dtypein%7C%7C%7Csrc%3D%28direct%29%7C%7C%7Cmdm%3D%28none%29%7C%7C%7Ccmp%3D%28none%29%7C%7C%7Ccnt%3D%28none%29%7C%7C%7Ctrm%3D%28none%29%7C%7C%7Cid%3D%28none%29%7C%7C%7Cplt%3D%28none%29%7C%7C%7Cfmt%3D%28none%29%7C%7C%7Ctct%3D%28none%29; argus_session=lbhjfm58duufdtm0dkrdvus3b2; sbjs_current=typ%3Dorganic%7C%7C%7Csrc%3Dgoogle%7C%7C%7Cmdm%3Dorganic%7C%7C%7Ccmp%3D%28none%29%7C%7C%7Ccnt%3D%28none%29%7C%7C%7Ctrm%3D%28none%29%7C%7C%7Cid%3D%28none%29%7C%7C%7Cplt%3D%28none%29%7C%7C%7Cfmt%3D%28none%29%7C%7C%7Ctct%3D%28none%29; sbjs_current_add=fd%3D2025-10-26%2018%3A43%3A33%7C%7C%7Cep%3Dhttps%3A%2F%2Fbtu.edu.ge%2F%7C%7C%7Crf%3Dhttps%3A%2F%2Fwww.google.com%2F; _gcl_au=1.1.229883049.1762966202; sbjs_udata=vst%3D12%7C%7C%7Cuip%3D%28none%29%7C%7C%7Cuag%3DMozilla%2F5.0%20%28Windows%20NT%2010.0%3B%20Win64%3B%20x64%29%20AppleWebKit%2F537.36%20%28KHTML%2C%20like%20Gecko%29%20Chrome%2F142.0.0.0%20Safari%2F537.36; _ga=GA1.1.866628031.1754130837; _ga_Z3J6WZG5WL=GS2.1.s1763411709$o29$g1$t1763411876$j20$l0$h0; _ga_GB7ZZ5PPHE=GS2.1.s1763411709$o29$g1$t1763411876$j20$l0$h0; cf_clearance=DACELx_VZ4l1KouCLZJHEYHHrc29s6m5fX5t_IkbRp0-1764226054-1.2.1.1-lkeKAswLVm1eaew6wOeatyjEsA4xnRhrpRAMUwGZgZ9GldBD_OL2c8kRsM3YqOoBPaIYhVgN5MwVfJzFODOJbA2jQaeIylroKhMlQ5A8z2A9n0kj0Ela1VRM06qNx3ZeyfuaVPtIj5ddgOdJdyvzBUqdQJcEgcBzSBgMQoYdnpeYcrTdj8.f.PiB0ZAPT25tkX3LPdvmDKpyEDe9tKFgx6dvQmQSOY5uYhljg2XCXmI" # make sure this includes argus_session + cf_clearance
+        "Cookie": cookie or COOKIE
     }
-    if cookie:
-        headers["Cookie"] = cookie
     close_client = False
     if client is None:
         client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
         close_client = True
     try:
         r = await client.get(url, headers=headers)
+        if r.status_code == 403:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Access forbidden: 403. Invalid/expired cookie or Cloudflare blocked request. URL: {url}"
+            )
         r.raise_for_status()
         return r.text
     finally:
@@ -80,20 +78,24 @@ async def fetch_text(url: str, cookie: Optional[str] = None, client: Optional[ht
 
 
 async def fetch_bytes(url: str, cookie: Optional[str] = None, client: Optional[httpx.AsyncClient] = None) -> bytes:
-    headers = {"User-Agent": "Mozilla/5.0", "Accept": "*/*"}
-    if cookie:
-        headers["Cookie"] = cookie
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "*/*", "Cookie": cookie or COOKIE}
     close_client = False
     if client is None:
         client = httpx.AsyncClient(timeout=60.0, follow_redirects=True)
         close_client = True
     try:
         r = await client.get(url, headers=headers)
+        if r.status_code == 403:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Access forbidden: 403. Invalid/expired cookie or Cloudflare blocked request. URL: {url}"
+            )
         r.raise_for_status()
         return r.content
     finally:
         if close_client:
             await client.aclose()
+
 
 # --- Parsing helpers (ported from your script) ---
 def parse_num(td_text: str):
@@ -165,7 +167,6 @@ def extract_course_urls(html: str) -> Dict[str, str]:
     return urls
 
 
-import re
 def parse_scores(html: str) -> Dict[str, Any]:
     soup = BeautifulSoup(html, "html.parser")
     data = {"group": None, "lector": None, "assessments": []}
@@ -221,7 +222,6 @@ def parse_files(html: str, my_lector: Optional[str] = None) -> List[Dict[str, Op
         file_link = tds[0].select_one("a[href*='/uploads/']")
         name = tds[0].get_text(strip=True)
         url = file_link["href"] if file_link and file_link.get("href") else None
-        # convert to absolute
         if url:
             url = urllib.parse.urljoin(BASE_URL, url)
         ext_link = tds[1].select_one("a") if len(tds) > 1 else None
@@ -276,7 +276,7 @@ async def fetch_course_pages(course: Dict[str, Any], cookie: Optional[str] = Non
         await f.write(course_html)
 
     urls = extract_course_urls(course_html)
-    # fetch subpages according to rules in your script
+    # fetch subpages according to rules
     async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
         for name, url in urls.items():
             if name == "syllabus_file":
@@ -288,10 +288,8 @@ async def fetch_course_pages(course: Dict[str, Any], cookie: Optional[str] = Non
                         await save_bytes(os.path.join(html_folder, f"{name}.pdf"), b)
                         await save_bytes(out_pdf, b)
                     except Exception as e:
-                        # ignore download errors, continue
                         print("syllabus download failed", e)
             elif name == "scores":
-                # always refetch
                 try:
                     txt = await fetch_text(url, cookie=cookie, client=client)
                     async with aiofiles.open(os.path.join(html_folder, f"{name}.html"), "w", encoding="utf-8") as f:
@@ -306,7 +304,6 @@ async def fetch_course_pages(course: Dict[str, Any], cookie: Optional[str] = Non
                 except Exception as e:
                     print("files fetch failed", e)
             else:
-                # groups or syllabus - don't refetch if exists
                 path_html = os.path.join(html_folder, f"{name}.html")
                 if not os.path.exists(path_html):
                     try:
@@ -341,7 +338,7 @@ async def parse_course_data_from_folder(html_folder: str) -> Dict[str, Any]:
     return data
 
 
-# HTML generation functions (uses the same template strings as your script)
+# --- HTML generation functions ---
 def fmt_num(val):
     if isinstance(val, float) and val == int(val):
         return str(int(val))
@@ -408,12 +405,10 @@ def generate_course_html(course: Dict[str, Any], data: Dict[str, Any]) -> str:
         grade_display = str(grade)
         pct_badge = ""
 
-    # safe course folder used for file links
     course_folder = os.path.join(COURSES_DIR, "".join(c for c in course["name"] if c.isalnum() or c in (" ", "-", "_")).strip())
     syllabus_path = os.path.join(course_folder, "syllabus.pdf")
     has_syllabus = os.path.exists(syllabus_path) or bool(data.get("syllabus_file"))
 
-    # Build assessments HTML
     assessments_html = ""
     for a in scores.get("assessments", []):
         raw_score = a["score"]
@@ -444,233 +439,75 @@ def generate_course_html(course: Dict[str, Any], data: Dict[str, Any]) -> str:
                 pct = ""
         else:
             score_display = "—"
-            score_class = " empty"
+            score_class = ""
             pct = ""
-        name = a["component"]
-        if "(" in name:
-            name = name.split("(")[0].strip()
-        assessments_html += f'<span class="assessment"><span class="assessment-name">{name}</span><span class="assessment-score{score_class}">{score_display}</span>{pct}</span>'
-
-    syllabus_html = ""
-    if has_syllabus and data.get("syllabus_file"):
-        # render proxy link - frontend will request /api/proxy?url=<encoded>
-        syllabus_html = f'<a href="/api/proxy?url={urllib.parse.quote(data["syllabus_file"], safe="")}" class="syllabus-link" target="_blank">Syllabus</a>'
-    elif os.path.exists(syllabus_path):
-        syllabus_html = f'<a href="/{syllabus_path.replace(os.sep, "/")}" class="syllabus-link" target="_blank">Syllabus</a>'
+        assessments_html += f'<div class="assess"><span class="name">{a["component"]}</span>: <span class="score{score_class}">{score_display}</span> {pct}</div>'
 
     materials_html = ""
-    if materials:
-        material_links = ""
-        for m in materials:
-            if m["url"]:
-                prox = f'/api/proxy?url={urllib.parse.quote(m["url"], safe="")}'
-                material_links += f'<a href="{prox}" class="material" target="_blank">{m["name"]}</a>'
-        materials_html = f'''<div class="materials-section">
-            <div class="materials-toggle"><span class="arrow">▶</span> Materials ({len(materials)})</div>
-            <div class="materials">{material_links}</div>
-        </div>'''
+    for m in materials:
+        url = m.get("url") or m.get("external_url") or "#"
+        name = m.get("name") or "file"
+        materials_html += f'<div class="material"><a href="{url}" target="_blank">{name}</a></div>'
 
-    return f'''<div class="course">
-    <div class="course-header">
-        <div class="course-info">
-            <div class="course-name">{course['name']}</div>
-            <div class="course-meta">Group {scores.get('group', '?')} · {scores.get('lector', 'Unknown')}</div>
-        </div>
-        {syllabus_html}
-        <span class="ects">{int(course['ects']) if isinstance(course['ects'], (float, int)) else course['ects']} ECTS</span>
-        <div class="grade" style="color: {grade_color}">{grade_display}{pct_badge}</div>
+    html = f"""
+    <div class="course">
+        <h2>{course['name']}</h2>
+        <div class="grade" style="color:{grade_color}">{grade_display} {pct_badge}</div>
+        <div class="assessments">{assessments_html}</div>
+        <div class="materials">{materials_html}</div>
+        {'<a href="' + syllabus_path + '" target="_blank">Syllabus PDF</a>' if has_syllabus else ''}
     </div>
-    <div class="assessments">{assessments_html}</div>
-    {materials_html}
-</div>'''
+    """
+    return html
 
 
-def generate_summary_html(courses_data: List[tuple], total_ects: Optional[float]) -> str:
-    total_score = 0
-    total_max_possible = 0
-    total_ects_earned = 0
-    course_count = len(courses_data)
-    course_percentages = []
-    for course, data in courses_data:
-        grade = course["grade"]
-        ects = course["ects"]
-        if isinstance(grade, (int, float)):
-            total_score += grade
-        course_max = 0
-        for a in data.get("scores", {}).get("assessments", []):
-            if a.get("score") and a.get("max_points"):
-                course_max += a["max_points"]
-        total_max_possible += course_max
-        if isinstance(grade, (int, float)) and course_max > 0 and isinstance(ects, (int, float)):
-            pct = (grade / course_max) * 100
-            course_percentages.append((pct, ects))
-            total_ects_earned += ects
-    weighted_gpa = 0
-    for pct, ects in course_percentages:
-        if pct >= 91:
-            gpa_points = 4.0
-        elif pct >= 81:
-            gpa_points = 3.0
-        elif pct >= 71:
-            gpa_points = 2.0
-        elif pct >= 61:
-            gpa_points = 1.0
-        elif pct >= 51:
-            gpa_points = 0.5
-        else:
-            gpa_points = 0.0
-        weighted_gpa += gpa_points * ects
-    gpa = weighted_gpa / total_ects_earned if total_ects_earned > 0 else 0
-    gpa_pct = (gpa / 4.0) * 100
-    gpa_color = get_percentage_color(gpa_pct)
-    score_pct = (total_score / total_max_possible * 100) if total_max_possible > 0 else 0
-    score_color = get_percentage_color(score_pct)
-    if total_max_possible > 0 and 0 < score_pct < 100:
-        score_pct_badge = f'<span class="pct-badge" style="background: {score_color}20; color: {score_color}">{score_pct:.0f}%</span>'
-    else:
-        score_pct_badge = ""
-    return f'''<div class="summary">
-    <div class="summary-item">
-        <div class="summary-label">GPA</div>
-        <div class="summary-value" style="color: {gpa_color}">{gpa:.2f}</div>
-    </div>
-    <div class="summary-item">
-        <div class="summary-label">Total Score</div>
-        <div class="summary-value" style="color: {score_color}">{fmt_num(total_score)}/{fmt_num(total_max_possible)} {score_pct_badge}</div>
-    </div>
-    <div class="summary-item">
-        <div class="summary-label">Courses</div>
-        <div class="summary-value" style="color: #a78bfa">{course_count}</div>
-    </div>
-    <div class="summary-item">
-        <div class="summary-label">ECTS</div>
-        <div class="summary-value" style="color: #a78bfa">{fmt_num(total_ects_earned)}</div>
-    </div>
-</div>'''
-
-
-def generate_dashboard_html(courses_data: List[tuple], total_ects: Optional[float] = None) -> str:
-    # Read template
-    template_path = os.path.join(TEMPLATES_DIR, TEMPLATE_NAME)
-    if not os.path.exists(template_path):
-        raise FileNotFoundError(f"Template not found at {template_path}. Place your HTML template there.")
-    template = jinja_env.get_template(TEMPLATE_NAME).render()  # we'll replace placeholders manually as in your script
-
-    # build courses html
-    courses_html = ""
-    for course, data in courses_data:
-        courses_html += generate_course_html(course, data)
-    summary_html = generate_summary_html(courses_data, total_ects)
-    rendered = template.replace("{{COURSES}}", courses_html).replace("{{SUMMARY}}", summary_html)
-    return rendered
-
-
-# --- FastAPI endpoints ---
-
-@app.post("/api/set_cookie")
-async def set_cookie(cookie: str = Body(..., embed=True)):
-    """Set session cookie for future requests (kept in memory)."""
-    global COOKIE
-    COOKIE = cookie
-    return {"status": "ok"}
-
-
+# --- API routes ---
 @app.post("/api/fetch")
 async def api_fetch(url: str = Body(...), binary: bool = Body(False)):
-    """
-    Fetch a remote URL using the server cookie (or provided cookie param).
-    Body: { "url": "...", "binary": false }
-    """
-    if binary:
-        b = await fetch_bytes(url, cookie=COOKIE)
-        return Response(content=b, media_type="application/octet-stream")
-    else:
-        txt = await fetch_text(url, cookie=COOKIE)
-        return HTMLResponse(txt)
+    try:
+        if binary:
+            b = await fetch_bytes(url, cookie=COOKIE)
+            return Response(content=b, media_type="application/octet-stream")
+        else:
+            txt = await fetch_text(url, cookie=COOKIE)
+            return HTMLResponse(txt)
+    except HTTPException as e:
+        return JSONResponse(status_code=e.status_code, content={"error": e.detail})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.get("/api/proxy")
 async def api_proxy(url: str = Query(...)):
-    """
-    Proxy a file download. Streams bytes from remote server to client.
-    Example: /api/proxy?url=<encoded full url>
-    """
     if not url:
         raise HTTPException(status_code=400, detail="Missing url")
-    # use httpx streaming
-    headers = {"User-Agent": "Mozilla/5.0", "Accept": "*/*"}
-    if COOKIE:
-        headers["Cookie"] = COOKIE
-    async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
-        r = await client.get(url, headers=headers, stream=True)
-        if r.status_code >= 400:
-            return Response(content=await r.aread(), status_code=r.status_code)
-        content_type = r.headers.get("content-type", "application/octet-stream")
-        # Create generator for streaming
-        async def streamer():
-            async for chunk in r.aiter_bytes():
-                yield chunk
-        return StreamingResponse(streamer(), media_type=content_type)
-
-@app.get("/api/courses")
-async def api_courses():
-    """Return parsed courses list from the main page (does not fetch subpages)."""
-    html = await fetch_text(BASE_URL, cookie=COOKIE)
-    courses, total_ects = parse_courses(html)
-    return {"courses": courses, "total_ects": total_ects}
+    try:
+        headers = {"User-Agent": "Mozilla/5.0", "Accept": "*/*", "Cookie": COOKIE} if COOKIE else {"User-Agent": "Mozilla/5.0"}
+        async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+            r = await client.get(url, headers=headers, stream=True)
+            if r.status_code == 403:
+                return JSONResponse(status_code=403, content={"error": f"Access forbidden: 403. URL: {url}"})
+            r.raise_for_status()
+            async def streamer():
+                async for chunk in r.aiter_bytes():
+                    yield chunk
+            content_type = r.headers.get("content-type", "application/octet-stream")
+            return StreamingResponse(streamer(), media_type=content_type)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
-@app.post("/api/generate")
-async def api_generate(refetch: bool = Body(False)):
-    """
-    Full flow: fetch courses, then for each course fetch course pages (scores/files), parse them,
-    download materials (into courses/<name>/material) and write index.html to disk. Returns a simple status.
-    """
-    html = await fetch_text(BASE_URL, cookie=COOKIE)
-    courses, total_ects = parse_courses(html)
-
-    courses_data = []
-    idx = 0
-    for course in courses:
-        idx += 1
-        # fetch course pages (and save relevant html & pdfs)
-        res = await fetch_course_pages(course, cookie=COOKIE)
-        # parse data from saved html folder
-        data = await parse_course_data_from_folder(res.get("html_folder", ""))
-        # download materials now (if any)
-        materials = data.get("materials", [])
-        course_folder = res.get("course_folder")
-        if materials and course_folder:
-            for m in materials:
-                if not m.get("url"):
-                    continue
-                filename = os.path.basename(urllib.parse.urlparse(m["url"]).path)
-                outpath = os.path.join(course_folder, "material", filename)
-                if os.path.exists(outpath):
-                    continue
-                try:
-                    b = await fetch_bytes(m["url"], cookie=COOKIE)
-                    await save_bytes(outpath, b)
-                except Exception as e:
-                    print("Failed to download", m.get("url"), e)
-        courses_data.append((course, data))
-
-    # generate dashboard HTML and save to INDEX_HTML
-    dashboard_html = generate_dashboard_html(courses_data, total_ects)
-    async with aiofiles.open(INDEX_HTML, "w", encoding="utf-8") as f:
-        await f.write(dashboard_html)
-
-    return {"status": "ok", "courses_count": len(courses_data)}
+# Mount static folders for templates and generated HTML
+app.mount("/html", StaticFiles(directory=HTML_DIR), name="html")
+app.mount("/courses", StaticFiles(directory=COURSES_DIR), name="courses")
 
 
-# Serve static files and index.html
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
-@app.get("/", response_class=HTMLResponse)
-async def root():
-    # If index.html exists in project root (generated), serve it; otherwise inform to generate
-    if os.path.exists(INDEX_HTML):
-        async with aiofiles.open(INDEX_HTML, encoding="utf-8") as f:
-            return HTMLResponse(await f.read())
-    else:
-        return HTMLResponse("<html><body><h3>Index not generated yet.</h3><p>Call POST /api/generate to produce dashboard (set cookie first via /api/set_cookie).</p></body></html>")
+@app.get("/")
+async def index():
+    # Just list courses folder
+    courses_list = sorted(os.listdir(COURSES_DIR))
+    html_list = "<ul>"
+    for c in courses_list:
+        html_list += f'<li><a href="/courses/{c}/course.html">{c}</a></li>'
+    html_list += "</ul>"
+    return HTMLResponse(f"<h1>Courses</h1>{html_list}")
