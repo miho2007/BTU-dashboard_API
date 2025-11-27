@@ -62,7 +62,7 @@ async def fetch_text(url: str, cookie: Optional[str] = None, client: Optional[ht
         "Sec-Fetch-Dest": "empty",
         "Sec-Ch-Ua": '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
         "Sec-Ch-Ua-Platform": '"Windows"',
-        "Cookie": COOKIE  # make sure this includes argus_session + cf_clearance
+        "Cookie": COOKIE or "" # make sure this includes argus_session + cf_clearance
     }
     if cookie:
         headers["Cookie"] = cookie
