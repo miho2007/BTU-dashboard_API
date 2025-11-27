@@ -40,28 +40,39 @@ jinja_env = Environment(loader=FileSystemLoader(TEMPLATES_DIR), autoescape=True)
 
 # ---------------- Playwright fetch ----------------
 async def fetch_text_playwright(url: str, cookie: Optional[str] = None) -> str:
-    """Fetch JS-rendered page using Playwright."""
+    """Fetch JS-rendered page using Playwright with table wait."""
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context()
+
+        # Set cookies properly
         if cookie:
             cookies_list = []
             for c in cookie.split(";"):
                 if "=" in c:
                     name, value = c.strip().split("=", 1)
-                    cookies_list.append({"name": name, "value": value, "domain": ".btu.edu.ge", "path": "/"})
+                    cookies_list.append({
+                        "name": name,
+                        "value": value,
+                        "domain": ".btu.edu.ge",
+                        "path": "/",
+                        "httpOnly": False,
+                        "secure": True,
+                        "sameSite": "Lax"
+                    })
             if cookies_list:
                 await context.add_cookies(cookies_list)
+
         page = await context.new_page()
         await page.goto(url, timeout=60000)
 
-        # --- Wait for table to load to avoid 0 courses ---
+        # Wait for courses table to load
         try:
             await page.wait_for_selector("table.table.table-striped.table-bordered.table-hover.fluid", timeout=15000)
         except Exception:
-            pass  # fallback if selector not found
+            print("Warning: table not found, page may not have loaded fully.")
 
-        await page.wait_for_timeout(1000)  # extra 1s to ensure JS finishes
+        await page.wait_for_timeout(1000)  # extra wait to ensure JS finishes
         html = await page.content()
         await browser.close()
         return html
@@ -151,7 +162,12 @@ async def api_courses():
         raise HTTPException(status_code=400, detail="Missing BTU_COOKIE environment variable")
     html = await fetch_text_playwright(BASE_URL, cookie=COOKIE)
     courses, total_ects = parse_courses(html)
-    return {"courses": courses, "total_ects": total_ects}
+    # Fetch individual course pages immediately
+    courses_data = []
+    for course in courses:
+        data = await fetch_course_pages(course, cookie=COOKIE)
+        courses_data.append({**course, **data})
+    return {"courses": courses_data, "total_ects": total_ects}
 
 @app.post("/api/fetch")
 async def api_fetch(url: str = Body(...), binary: bool = Body(False)):
