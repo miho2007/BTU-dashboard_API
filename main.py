@@ -168,48 +168,37 @@ async def index():
     html_list += "</ul>"
     return HTMLResponse(f"<h1>Courses</h1>{html_list}")
 
+class FetchInput(BaseModel):
+    url: str
+    binary: bool = False
 
+@app.post("/api/fetch")
+async def api_fetch(input: FetchInput):
+    url = input.url
+    binary = input.binary
 
-@app.post("/api/set-cookie")
-async def set_cookie(input: CookieInput):
-    """
-    Convert raw cookie string from user into Playwright-compatible auth.json
-    """
-    raw_cookie = input.raw_cookie
+    # Check if auth.json exists
+    if not os.path.exists("auth.json"):
+        raise HTTPException(status_code=400, detail="Auth file missing. Please set cookie first.")
+
     try:
-        cookie_items = []
-
-        # Split "name=value" pairs
-        for part in raw_cookie.split(";"):
-            if "=" not in part:
-                continue
-            name, value = part.strip().split("=", 1)
-
-            cookie_items.append({
-                "name": name.strip(),
-                "value": value.strip(),
-                "domain": ".classroom.btu.edu.ge",
-                "path": "/",
-                "httpOnly": False,   # BTU cookies are not httpOnly in browser
-                "secure": True,
-                "sameSite": "Lax"
-            })
-
-        storage_state = {
-            "cookies": cookie_items,
-            "origins": []
-        }
-
-        # Save to auth.json
-        import json
-        with open("auth.json", "w") as f:
-            json.dump(storage_state, f, indent=4)
-
-        return {"status": "ok", "message": "auth.json created successfully"}
-
+        if binary:
+            async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+                r = await client.get(url)
+                r.raise_for_status()
+                return Response(content=r.content, media_type="application/octet-stream")
+        else:
+            # Use Playwright for JS-rendered pages
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                context = await browser.new_context(storage_state="auth.json")
+                page = await context.new_page()
+                await page.goto(url, timeout=60000)
+                html = await page.content()
+                await browser.close()
+                return HTMLResponse(html)
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
-
 
 # ---------------- Manual login helper ----------------
 async def create_storage_state():
