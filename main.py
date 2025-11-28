@@ -155,6 +155,45 @@ async def api_fetch(url: str = Body(...), binary: bool = Body(False)):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
+
+
+from pydantic import BaseModel
+
+class CookieInput(BaseModel):
+    raw_cookie: str
+
+@app.post("/api/set-cookie")
+async def set_cookie(input: CookieInput):
+    raw_cookie = input.raw_cookie
+    try:
+        cookie_items = []
+
+        for part in raw_cookie.split(";"):
+            if "=" not in part:
+                continue
+            name, value = part.strip().split("=", 1)
+            cookie_items.append({
+                "name": name.strip(),
+                "value": value.strip(),
+                "domain": ".classroom.btu.edu.ge",
+                "path": "/",
+                "httpOnly": False,
+                "secure": True,
+                "sameSite": "Lax"
+            })
+
+        storage_state = {"cookies": cookie_items, "origins": []}
+
+        import json
+        with open("auth.json", "w") as f:
+            json.dump(storage_state, f, indent=4)
+
+        return {"status": "ok", "message": "auth.json created successfully"}
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 # ---------------- Static files ----------------
 app.mount("/html", StaticFiles(directory=HTML_DIR), name="html")
 app.mount("/courses", StaticFiles(directory=COURSES_DIR), name="courses")
