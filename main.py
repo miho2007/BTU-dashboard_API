@@ -3,8 +3,7 @@ import os
 import urllib.parse
 from typing import Optional, Tuple, List, Dict, Any
 import aiofiles
-from fastapi import FastAPI, Body, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from bs4 import BeautifulSoup
@@ -14,11 +13,9 @@ from playwright.async_api import async_playwright
 BASE_URL = "https://classroom.btu.edu.ge/en/student/me/courses"
 HTML_DIR = "html"
 COURSES_DIR = "courses"
-DEBUG_DIR = "debug"
 
 os.makedirs(HTML_DIR, exist_ok=True)
 os.makedirs(COURSES_DIR, exist_ok=True)
-os.makedirs(DEBUG_DIR, exist_ok=True)
 
 app = FastAPI(title="BTU Courses API")
 
@@ -171,9 +168,11 @@ def parse_groups(html: str) -> Dict:
 async def fetch_html(url: str, raw_cookie: str) -> str:
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context()
-
-        # Convert raw cookie
+        context = await browser.new_context(
+            viewport={"width": 1920, "height": 1080},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
+        )
+        # convert raw cookie
         cookies = []
         for part in raw_cookie.split(";"):
             if "=" not in part:
@@ -182,26 +181,22 @@ async def fetch_html(url: str, raw_cookie: str) -> str:
             cookies.append({
                 "name": name.strip(),
                 "value": value.strip(),
-                "domain": ".classroom.btu.edu.ge",
+                "domain": "classroom.btu.edu.ge",
                 "path": "/",
                 "httpOnly": True,
                 "secure": True,
                 "sameSite": "Lax"
             })
         await context.add_cookies(cookies)
-
         page = await context.new_page()
-        # Set standard desktop user agent
-        await page.set_extra_http_headers({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"})
         await page.goto(url, timeout=120000)
-        await page.wait_for_timeout(3000)  # wait JS to render
+        # wait for the table to appear
+        await page.wait_for_selector("table.table.table-striped.table-bordered.table-hover.fluid", timeout=15000)
         html = await page.content()
-
-        # Debug: save fetched HTML
-        filename = os.path.join(DEBUG_DIR, "last_fetch.html")
-        async with aiofiles.open(filename, "w", encoding="utf-8") as f:
+        # save debug
+        safe_file = os.path.join(HTML_DIR, "debug.html")
+        async with aiofiles.open(safe_file, "w", encoding="utf-8") as f:
             await f.write(html)
-
         await browser.close()
         return html
 
@@ -239,12 +234,9 @@ async def fetch_course_pages(course: Dict[str, Any], raw_cookie: str) -> Dict[st
 @app.post("/api/courses-full")
 async def api_courses_full(input: CookieInput):
     raw_cookie = input.raw_cookie
-    try:
-        html = await fetch_html(BASE_URL, raw_cookie)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching main page: {e}")
-
+    html = await fetch_html(BASE_URL, raw_cookie)
     courses, total_ects = parse_courses(html)
+
     full_data = []
     for course in courses:
         data = await fetch_course_pages(course, raw_cookie)
