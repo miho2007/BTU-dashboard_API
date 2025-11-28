@@ -108,6 +108,84 @@ def parse_courses(html: str) -> Tuple[List[Dict[str, Any]], Optional[float]]:
     return courses, total_ects
 
 # ---------------- Fetch course pages ----------------
+
+
+def parse_courses(html: str) -> Tuple[List[Dict[str, Any]], Optional[float]]:
+    """
+    Parse course table from BTU Classroom HTML. Robust to minor HTML changes.
+    Returns list of courses and total ECTS.
+    """
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+    table = soup.find("table")
+    if not table:
+        print("Warning: No table found in HTML")
+        return [], None
+
+    tbody = table.find("tbody")
+    if not tbody:
+        print("Warning: Table has no tbody")
+        return [], None
+
+    courses = []
+    total_ects = None
+
+    for tr in tbody.find_all("tr"):
+        tds = tr.find_all("td")
+        tds_text = [td.get_text(strip=True) for td in tds]
+        # Debug: print row content
+        # print("Row TDS:", tds_text)
+
+        # Detect total ECTS row
+        if len(tds) == 2 and not tds_text[0]:
+            try:
+                total_ects = float(tds_text[1].replace(",", "."))
+            except:
+                total_ects = None
+            continue
+
+        # Skip rows that don’t look like courses
+        if len(tds) < 6:
+            continue
+
+        # Get course name
+        name_a = tds[2].find("a")
+        name = name_a.get_text(strip=True) if name_a else tds_text[2]
+
+        # Grade and ECTS
+        grade_txt = tds_text[3]
+        ects_txt = tds_text[5]
+
+        try:
+            grade = float(grade_txt.replace(",", ".")) if grade_txt.replace(",", ".").replace(".", "").isdigit() else None
+        except:
+            grade = None
+
+        try:
+            ects = float(ects_txt.replace(",", ".")) if ects_txt.replace(",", ".").replace(".", "").isdigit() else None
+        except:
+            ects = None
+
+        # Course URL
+        url = name_a["href"] if name_a and name_a.has_attr("href") else None
+        if url and not urllib.parse.urlparse(url).netloc:
+            url = urllib.parse.urljoin(BASE_URL, url)
+
+        courses.append({
+            "name": name,
+            "grade": grade if grade is not None else 0,
+            "ects": ects if ects is not None else 0,
+            "url": url
+        })
+
+    print(f"Parsed {len(courses)} courses, total ECTS: {total_ects}")
+    return courses, total_ects
+
+
+
+
+
 async def fetch_course_pages(course: Dict[str, Any], storage_state: Optional[str] = "auth.json") -> Dict[str, Any]:
     if not course.get("url"):
         return {}
