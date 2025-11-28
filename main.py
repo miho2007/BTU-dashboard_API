@@ -13,7 +13,6 @@ from bs4 import BeautifulSoup
 BASE_URL = "https://classroom.btu.edu.ge/en/student/me/courses"
 HTML_DIR = "html"
 COURSES_DIR = "courses"
-SCRAPEDO_TOKEN = "9544edbc31754b16a4a7d30a075cbc0a4d9a67be397"
 
 os.makedirs(HTML_DIR, exist_ok=True)
 os.makedirs(COURSES_DIR, exist_ok=True)
@@ -90,6 +89,7 @@ def extract_course_urls(html: str) -> Dict[str, str]:
         urls["syllabus_file"] = syllabus_file["href"]
     return urls
 
+# Parsing helpers for scores, files, groups remain same as your code...
 def parse_scores(html: str) -> Dict:
     import re
     soup = BeautifulSoup(html, "html.parser")
@@ -165,21 +165,14 @@ def parse_groups(html: str) -> Dict:
             groups.append(text)
     return {"groups": groups}
 
-# ------------------ SCRAPEDO FETCH ------------------
+# ------------------ HTTPX FETCH ------------------
 async def fetch_html(url: str, raw_cookie: str) -> str:
-    headers = {"Cookie": raw_cookie}
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.get(
-            "https://api.scrape.do",
-            params={
-                "token": SCRAPEDO_TOKEN,
-                "url": url
-            },
-            headers=headers
-        )
+    headers = {"Cookie": raw_cookie, "User-Agent": "Mozilla/5.0"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url, headers=headers)
         resp.raise_for_status()
         html = resp.text
-        # save debug
+        # Save debug
         safe_file = os.path.join(HTML_DIR, "debug.html")
         async with aiofiles.open(safe_file, "w", encoding="utf-8") as f:
             await f.write(html)
@@ -188,17 +181,7 @@ async def fetch_html(url: str, raw_cookie: str) -> str:
 async def fetch_course_pages(course: Dict[str, Any], raw_cookie: str) -> Dict[str, Any]:
     if not course.get("url"):
         return {}
-    course_name = course["name"]
-    safe_name = "".join(c for c in course_name if c.isalnum() or c in (" ", "-", "_")).strip()
-    html_folder = os.path.join(HTML_DIR, safe_name)
-    course_folder = os.path.join(COURSES_DIR, safe_name)
-    os.makedirs(html_folder, exist_ok=True)
-    os.makedirs(course_folder, exist_ok=True)
-
     course_html = await fetch_html(course["url"], raw_cookie)
-    async with aiofiles.open(os.path.join(html_folder, "course.html"), "w", encoding="utf-8") as f:
-        await f.write(course_html)
-
     urls = extract_course_urls(course_html)
     data = {}
     if "scores" in urls:
@@ -221,12 +204,10 @@ async def api_courses_full(input: CookieInput):
     raw_cookie = input.raw_cookie
     html = await fetch_html(BASE_URL, raw_cookie)
     courses, total_ects = parse_courses(html)
-
     full_data = []
     for course in courses:
         data = await fetch_course_pages(course, raw_cookie)
         full_data.append({"course": course, "data": data})
-
     return {"total_ects": total_ects, "courses": full_data}
 
 # ------------------ HEALTH ------------------
