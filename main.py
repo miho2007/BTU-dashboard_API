@@ -12,6 +12,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from jinja2 import Environment, FileSystemLoader
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
+from pydantic import BaseModel
+
+
 
 app = FastAPI(title="BTU Courses - FastAPI Playwright Scraper")
 
@@ -24,6 +27,9 @@ app.add_middleware(
 )
 
 # ---------------- Configuration ----------------
+class CookieInput(BaseModel):
+    raw_cookie: str
+
 BASE_URL = "https://classroom.btu.edu.ge/en/student/me/courses"
 HTML_DIR = "html"
 COURSES_DIR = "courses"
@@ -165,10 +171,11 @@ async def index():
 
 
 @app.post("/api/set-cookie")
-async def set_cookie(raw_cookie: str = Body(...)):
+async def set_cookie(input: CookieInput):
     """
     Convert raw cookie string from user into Playwright-compatible auth.json
     """
+    raw_cookie = input.raw_cookie
     try:
         cookie_items = []
 
