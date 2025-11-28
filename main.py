@@ -165,29 +165,38 @@ async def index():
 
 
 @app.post("/api/set-cookie")
-async def set_cookie(cookie: str = Body(...)):
+async def set_cookie(raw_cookie: str = Body(...)):
     """
-    Convert raw cookie string from user into Playwright storage state (auth.json)
+    Convert raw cookie string from user into Playwright-compatible auth.json
     """
     try:
-        # Convert cookie text into Playwright format
         cookie_items = []
-        for part in cookie.split(";"):
+
+        # Split "name=value" pairs
+        for part in raw_cookie.split(";"):
+            if "=" not in part:
+                continue
             name, value = part.strip().split("=", 1)
+
             cookie_items.append({
                 "name": name.strip(),
                 "value": value.strip(),
-                "domain": "classroom.btu.edu.ge",
+                "domain": ".classroom.btu.edu.ge",
                 "path": "/",
-                "httpOnly": True,
-                "secure": True
+                "httpOnly": False,   # BTU cookies are not httpOnly in browser
+                "secure": True,
+                "sameSite": "Lax"
             })
 
-        storage = {"cookies": cookie_items, "origins": []}
+        storage_state = {
+            "cookies": cookie_items,
+            "origins": []
+        }
 
+        # Save to auth.json
         import json
         with open("auth.json", "w") as f:
-            json.dump(storage, f)
+            json.dump(storage_state, f, indent=4)
 
         return {"status": "ok", "message": "auth.json created successfully"}
 
