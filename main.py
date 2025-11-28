@@ -164,15 +164,20 @@ class CookieInput(BaseModel):
 
 @app.post("/api/set-cookie")
 async def set_cookie(input: CookieInput):
+    """
+    Instead of manually parsing cookies, we launch a headless browser, set the cookie,
+    and save the full storage_state (cookies + localStorage) for Playwright.
+    """
     raw_cookie = input.raw_cookie
-    try:
-        cookie_items = []
 
+    try:
+        # Convert raw cookie string into Playwright format
+        cookies = []
         for part in raw_cookie.split(";"):
             if "=" not in part:
                 continue
             name, value = part.strip().split("=", 1)
-            cookie_items.append({
+            cookies.append({
                 "name": name.strip(),
                 "value": value.strip(),
                 "domain": ".classroom.btu.edu.ge",
@@ -182,16 +187,26 @@ async def set_cookie(input: CookieInput):
                 "sameSite": "Lax"
             })
 
-        storage_state = {"cookies": cookie_items, "origins": []}
+        # Launch headless browser and set cookies
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context()
+            await context.add_cookies(cookies)
 
-        import json
-        with open("auth.json", "w") as f:
-            json.dump(storage_state, f, indent=4)
+            page = await context.new_page()
+            await page.goto("https://classroom.btu.edu.ge/en/student/me/courses", timeout=60000)
+
+            # Wait a bit to ensure page fully loads
+            await page.wait_for_timeout(2000)
+
+            # Save storage_state with all cookies + localStorage
+            await context.storage_state(path="auth.json")
+            await browser.close()
 
         return {"status": "ok", "message": "auth.json created successfully"}
 
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        return {"status": "error", "message": str(e)}
 
 
 # ---------------- Static files ----------------
