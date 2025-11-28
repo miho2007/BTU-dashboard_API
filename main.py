@@ -20,6 +20,7 @@ os.makedirs(COURSES_DIR, exist_ok=True)
 
 app = FastAPI(title="BTU Courses API")
 
+# Allow CORS from any origin for frontend hosted elsewhere
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -43,7 +44,7 @@ def parse_num(txt: str):
 
 def parse_courses(html: str) -> Tuple[List[Dict[str, Any]], Optional[float]]:
     soup = BeautifulSoup(html, "html.parser")
-    table = soup.select_one("table.table-striped")  # more flexible
+    table = soup.select_one("table.table.table-striped.table-bordered.table-hover.fluid")
     if not table:
         return [], None
     tbody = table.find("tbody")
@@ -58,12 +59,12 @@ def parse_courses(html: str) -> Tuple[List[Dict[str, Any]], Optional[float]]:
         if len(tds) == 2 and not tds[0].get_text(strip=True):
             total_ects = parse_num(tds[-1].get_text(strip=True))
             continue
-        if len(tds) < 3:
+        if len(tds) != 6:
             continue
         name_a = tds[2].find("a")
         name = name_a.get_text(strip=True) if name_a else tds[2].get_text(strip=True)
-        grade = parse_num(tds[3].get_text(strip=True)) if len(tds) > 3 else None
-        ects = parse_num(tds[5].get_text(strip=True)) if len(tds) > 5 else None
+        grade = parse_num(tds[3].get_text(strip=True))
+        ects = parse_num(tds[5].get_text(strip=True))
         url = name_a["href"] if name_a and name_a.has_attr("href") else None
         if url and not urllib.parse.urlparse(url).netloc:
             url = urllib.parse.urljoin(BASE_URL, url)
@@ -113,14 +114,15 @@ def parse_scores(html: str) -> Dict:
             score = tds[1].get_text(strip=True)
             if component in ("სულ", "Credits") or "გამოცდაზე გასვლის" in component:
                 continue
-            max_points = None
-            max_match = re.search(r'max\.?\s*([\d.,]+)', component)
-            if max_match:
-                try:
-                    max_points = float(max_match.group(1).replace(",", "."))
-                except:
-                    pass
-            data["assessments"].append({"component": component, "score": score or None, "max_points": max_points})
+            if component:
+                max_points = None
+                max_match = re.search(r'max\.?\s*([\d.,]+)', component)
+                if max_match:
+                    try:
+                        max_points = float(max_match.group(1).replace(",", "."))
+                    except:
+                        pass
+                data["assessments"].append({"component": component, "score": score or None, "max_points": max_points})
     return data
 
 def parse_files(html: str, my_lector: Optional[str] = None) -> List[Dict]:
@@ -167,9 +169,15 @@ def parse_groups(html: str) -> Dict:
 # ------------------ PLAYWRIGHT FETCH ------------------
 async def fetch_html(url: str, raw_cookie: str) -> str:
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context()
-        # set all cookies from raw_cookie
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox"]
+        )
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+        )
+
+        # convert raw cookie
         cookies = []
         for part in raw_cookie.split(";"):
             if "=" not in part:
@@ -185,15 +193,10 @@ async def fetch_html(url: str, raw_cookie: str) -> str:
                 "sameSite": "Lax"
             })
         await context.add_cookies(cookies)
+
         page = await context.new_page()
-        # Set real UA
-        await page.set_user_agent(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-        )
         await page.goto(url, timeout=120000)
-        # Wait for the main table to appear
-        await page.wait_for_selector("table.table-striped", timeout=15000)
+        await page.wait_for_timeout(2000)
         html = await page.content()
         await browser.close()
         return html
@@ -201,8 +204,19 @@ async def fetch_html(url: str, raw_cookie: str) -> str:
 async def fetch_course_pages(course: Dict[str, Any], raw_cookie: str) -> Dict[str, Any]:
     if not course.get("url"):
         return {}
+    course_name = course["name"]
+    safe_name = "".join(c for c in course_name if c.isalnum() or c in (" ", "-", "_")).strip()
+    html_folder = os.path.join(HTML_DIR, safe_name)
+    course_folder = os.path.join(COURSES_DIR, safe_name)
+    os.makedirs(html_folder, exist_ok=True)
+    os.makedirs(course_folder, exist_ok=True)
+
     course_html = await fetch_html(course["url"], raw_cookie)
+    async with aiofiles.open(os.path.join(html_folder, "course.html"), "w", encoding="utf-8") as f:
+        await f.write(course_html)
+
     urls = extract_course_urls(course_html)
+    # fetch additional pages
     data = {}
     if "scores" in urls:
         scores_html = await fetch_html(urls["scores"], raw_cookie)
@@ -214,8 +228,6 @@ async def fetch_course_pages(course: Dict[str, Any], raw_cookie: str) -> Dict[st
     if "groups" in urls:
         groups_html = await fetch_html(urls["groups"], raw_cookie)
         data["groups"] = parse_groups(groups_html)
-    if "syllabus_file" in urls:
-        data["syllabus_file"] = urls["syllabus_file"]
     return data
 
 # ------------------ API ------------------
