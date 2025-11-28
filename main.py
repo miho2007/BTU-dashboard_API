@@ -162,6 +162,39 @@ async def index():
     html_list += "</ul>"
     return HTMLResponse(f"<h1>Courses</h1>{html_list}")
 
+
+
+@app.post("/api/set-cookie")
+async def set_cookie(cookie: str = Body(...)):
+    """
+    Convert raw cookie string from user into Playwright storage state (auth.json)
+    """
+    try:
+        # Convert cookie text into Playwright format
+        cookie_items = []
+        for part in cookie.split(";"):
+            name, value = part.strip().split("=", 1)
+            cookie_items.append({
+                "name": name.strip(),
+                "value": value.strip(),
+                "domain": "classroom.btu.edu.ge",
+                "path": "/",
+                "httpOnly": True,
+                "secure": True
+            })
+
+        storage = {"cookies": cookie_items, "origins": []}
+
+        import json
+        with open("auth.json", "w") as f:
+            json.dump(storage, f)
+
+        return {"status": "ok", "message": "auth.json created successfully"}
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 # ---------------- Manual login helper ----------------
 async def create_storage_state():
     """Run this once manually to generate auth.json for Playwright"""
