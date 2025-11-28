@@ -42,37 +42,63 @@ os.makedirs(TEMPLATES_DIR, exist_ok=True)
 jinja_env = Environment(loader=FileSystemLoader(TEMPLATES_DIR), autoescape=True)
 
 # ---------------- Playwright fetch ----------------
-async def fetch_text_playwright(url: str, storage_state: Optional[str] = None) -> str:
-    """Fetch JS-rendered page using Playwright with storageState authentication."""
+
+
+
+
+        
+        
+async def fetch_text_playwright(
+    url: str,
+    raw_cookie: Optional[str] = None,
+    storage_state: Optional[str] = None
+) -> str:
+    """
+    Fetch JS-rendered page using Playwright.
+    - Uses `storage_state` if provided (preferred).
+    - Falls back to `raw_cookie` if provided.
+    """
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(storage_state=storage_state)
+        browser = await p.chromium.launch(headless=True)  # headless for server
+
+        context_args = {}
+        if storage_state and os.path.exists(storage_state):
+            context_args["storage_state"] = storage_state
+
+        context = await browser.new_context(**context_args)
+
+        # If no storage_state, optionally set raw cookies
+        if not context_args and raw_cookie:
+            cookies = []
+            for part in raw_cookie.split(";"):
+                if "=" not in part:
+                    continue
+                name, value = part.strip().split("=", 1)
+                cookies.append({
+                    "name": name.strip(),
+                    "value": value.strip(),
+                    "domain": ".classroom.btu.edu.ge",
+                    "path": "/",
+                    "httpOnly": True,
+                    "secure": True,
+                    "sameSite": "Lax"
+                })
+            await context.add_cookies(cookies)
+
         page = await context.new_page()
-        await page.goto(url, timeout=60000)
+        await page.goto(url, timeout=120000)  # 2 minutes
+        await page.wait_for_timeout(10000)     # wait for JS to render
 
+        # Wait until at least one grade cell is non-zero
         try:
-            # Wait for table to appear
-            await page.wait_for_selector("table.table.table-striped.table-bordered.table-hover.fluid", timeout=15000)
-
-            # **Wait until at least one row has non-empty grade**
             await page.wait_for_function("""
                 () => {
-                    const rows = document.querySelectorAll('table tbody tr');
-                    return Array.from(rows).some(r => r.cells[3] && r.cells[3].innerText.trim() !== '');
+                    const tds = document.querySelectorAll('table tbody tr td:nth-child(4)');
+                    return Array.from(tds).some(td => td.textContent.trim() !== '0');
                 }
             """, timeout=15000)
-        except Exception:
-            print("Warning: table not fully loaded or no grades found.")
-
-        
-        
-        await page.wait_for_timeout(9000)
-        await page.wait_for_function("""
-        () => {
-        const tds = document.querySelectorAll('table tbody tr td:nth-child(4)');
-        return Array.from(tds).some(td => td.textContent.trim() !== '0');
-        }
-        """, timeout=10000)
+        except:
+            print("Warning: grades may still be zero")
 
         html = await page.content()
         await browser.close()
@@ -227,6 +253,7 @@ async def api_courses():
         raise HTTPException(status_code=400, detail="Auth file missing. Login manually first to create auth.json")
     
     html = await fetch_text_playwright(BASE_URL, storage_state="auth.json")
+
     courses, total_ects = parse_courses(html)
 
     courses_data = []
