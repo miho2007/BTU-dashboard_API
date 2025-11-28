@@ -14,13 +14,14 @@ from playwright.async_api import async_playwright
 BASE_URL = "https://classroom.btu.edu.ge/en/student/me/courses"
 HTML_DIR = "html"
 COURSES_DIR = "courses"
+DEBUG_DIR = "debug"
 
 os.makedirs(HTML_DIR, exist_ok=True)
 os.makedirs(COURSES_DIR, exist_ok=True)
+os.makedirs(DEBUG_DIR, exist_ok=True)
 
 app = FastAPI(title="BTU Courses API")
 
-# Allow CORS from any origin for frontend hosted elsewhere
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -169,15 +170,10 @@ def parse_groups(html: str) -> Dict:
 # ------------------ PLAYWRIGHT FETCH ------------------
 async def fetch_html(url: str, raw_cookie: str) -> str:
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox"]
-        )
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
-        )
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context()
 
-        # convert raw cookie
+        # Convert raw cookie
         cookies = []
         for part in raw_cookie.split(";"):
             if "=" not in part:
@@ -195,9 +191,17 @@ async def fetch_html(url: str, raw_cookie: str) -> str:
         await context.add_cookies(cookies)
 
         page = await context.new_page()
+        # Set standard desktop user agent
+        await page.set_extra_http_headers({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"})
         await page.goto(url, timeout=120000)
-        await page.wait_for_timeout(2000)
+        await page.wait_for_timeout(3000)  # wait JS to render
         html = await page.content()
+
+        # Debug: save fetched HTML
+        filename = os.path.join(DEBUG_DIR, "last_fetch.html")
+        async with aiofiles.open(filename, "w", encoding="utf-8") as f:
+            await f.write(html)
+
         await browser.close()
         return html
 
@@ -216,7 +220,6 @@ async def fetch_course_pages(course: Dict[str, Any], raw_cookie: str) -> Dict[st
         await f.write(course_html)
 
     urls = extract_course_urls(course_html)
-    # fetch additional pages
     data = {}
     if "scores" in urls:
         scores_html = await fetch_html(urls["scores"], raw_cookie)
@@ -228,15 +231,20 @@ async def fetch_course_pages(course: Dict[str, Any], raw_cookie: str) -> Dict[st
     if "groups" in urls:
         groups_html = await fetch_html(urls["groups"], raw_cookie)
         data["groups"] = parse_groups(groups_html)
+    if "syllabus_file" in urls:
+        data["syllabus_file"] = urls["syllabus_file"]
     return data
 
 # ------------------ API ------------------
 @app.post("/api/courses-full")
 async def api_courses_full(input: CookieInput):
     raw_cookie = input.raw_cookie
-    html = await fetch_html(BASE_URL, raw_cookie)
-    courses, total_ects = parse_courses(html)
+    try:
+        html = await fetch_html(BASE_URL, raw_cookie)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching main page: {e}")
 
+    courses, total_ects = parse_courses(html)
     full_data = []
     for course in courses:
         data = await fetch_course_pages(course, raw_cookie)
