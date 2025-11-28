@@ -65,8 +65,15 @@ async def fetch_text_playwright(url: str, storage_state: Optional[str] = None) -
             print("Warning: table not fully loaded or no grades found.")
 
         
-        await page.goto(url, timeout=60000)  # 60 seconds
+        
         await page.wait_for_timeout(9000)
+        await page.wait_for_function("""
+        () => {
+        const tds = document.querySelectorAll('table tbody tr td:nth-child(4)');
+        return Array.from(tds).some(td => td.textContent.trim() !== '0');
+        }
+        """, timeout=10000)
+
         html = await page.content()
         await browser.close()
         return html
