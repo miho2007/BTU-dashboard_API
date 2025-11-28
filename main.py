@@ -87,22 +87,28 @@ async def fetch_text_playwright(
 
         page = await context.new_page()
         await page.goto(url, timeout=120000)  # 2 minutes
-        await page.wait_for_timeout(10000)     # wait for JS to render
 
         # Wait until at least one grade cell is non-zero
         try:
             await page.wait_for_function("""
-                () => {
-                    const tds = document.querySelectorAll('table tbody tr td:nth-child(4)');
-                    return Array.from(tds).some(td => td.textContent.trim() !== '0');
-                }
-            """, timeout=15000)
+            () => {
+                const tds = document.querySelectorAll('table tbody tr td:nth-child(4)');
+                return Array.from(tds).some(td => {
+                    const txt = td.textContent.trim().replace(',', '.');
+                    return !isNaN(parseFloat(txt)) && parseFloat(txt) !== 0;
+                });
+            }
+            """, timeout=30000)  # wait up to 30 seconds
         except:
             print("Warning: grades may still be zero")
+
+        # Extra short delay to ensure lazy-loaded content is ready
+        await page.wait_for_timeout(2000)
 
         html = await page.content()
         await browser.close()
         return html
+
 
 
 # ---------------- File saving ----------------
