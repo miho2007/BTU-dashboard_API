@@ -64,6 +64,8 @@ async def fetch_text_playwright(url: str, storage_state: Optional[str] = None) -
         except Exception:
             print("Warning: table not fully loaded or no grades found.")
 
+        
+        await page.goto(url, timeout=60000)  # 60 seconds
         await page.wait_for_timeout(9000)
         html = await page.content()
         await browser.close()
