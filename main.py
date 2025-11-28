@@ -51,15 +51,24 @@ async def fetch_text_playwright(url: str, storage_state: Optional[str] = None) -
         await page.goto(url, timeout=60000)
 
         try:
-            # Wait for course table to appear
+            # Wait for table to appear
             await page.wait_for_selector("table.table.table-striped.table-bordered.table-hover.fluid", timeout=15000)
-        except Exception:
-            print("Warning: table not found, page may not have loaded fully.")
 
-        await page.wait_for_timeout(1000)  # extra wait for JS
+            # **Wait until at least one row has non-empty grade**
+            await page.wait_for_function("""
+                () => {
+                    const rows = document.querySelectorAll('table tbody tr');
+                    return Array.from(rows).some(r => r.cells[3] && r.cells[3].innerText.trim() !== '');
+                }
+            """, timeout=15000)
+        except Exception:
+            print("Warning: table not fully loaded or no grades found.")
+
+        await page.wait_for_timeout(1000)
         html = await page.content()
         await browser.close()
         return html
+
 
 # ---------------- File saving ----------------
 async def save_bytes(path: str, data: bytes):
